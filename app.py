@@ -411,5 +411,48 @@ async def run_bot_tasks(meeting_code, passcode, bot_count, duration_minutes):
     
     await asyncio.gather(*tasks)
 
+# ============================================
+# AUTO REGISTER WITH MASTER
+# ============================================
+
+@app.on_event("startup")
+async def register_with_master():
+
+    try:
+
+        async with httpx.AsyncClient(timeout=20) as client:
+
+            response = await client.post(
+                MASTER_URL + "/register",
+                json={
+                    "worker_id": WORKER_ID,
+                    "url": WORKER_URL,
+                    "capacity": 5
+                }
+            )
+
+            print("===================================")
+            print("REGISTERED WITH MASTER")
+            print(response.text)
+            print("===================================")
+
+    except Exception as e:
+
+        print("===================================")
+        print("MASTER REGISTRATION FAILED")
+        print(e)
+        print("===================================")
+
+
+@app.get("/health")
+async def health():
+
+    return {
+        "online": True,
+        "busy": False,
+        "capacity": 5,
+        "worker_id": WORKER_ID
+    }
+
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
