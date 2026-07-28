@@ -20,11 +20,16 @@ nest_asyncio.apply()
 
 app = FastAPI()
 
+import os
+
 MASTER_URL = "https://zoom-master-production.up.railway.app"
 
-WORKER_ID = "worker-1"
+WORKER_ID = os.getenv("WORKER_ID", "worker-1")
 
-WORKER_URL = "https://zoom-bot-account-1-production.up.railway.app"
+WORKER_URL = os.getenv(
+    "WORKER_URL",
+    "https://zoom-bot-account-1-production.up.railway.app"
+)
 
 # CORS
 app.add_middleware(
