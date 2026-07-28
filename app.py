@@ -13,6 +13,7 @@ from datetime import datetime
 from playwright.async_api import async_playwright
 import nest_asyncio
 import uvicorn
+import httpx
 from pathlib import Path
 
 nest_asyncio.apply()
