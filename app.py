@@ -13,23 +13,11 @@ from datetime import datetime
 from playwright.async_api import async_playwright
 import nest_asyncio
 import uvicorn
-import httpx
 from pathlib import Path
 
 nest_asyncio.apply()
 
 app = FastAPI()
-
-import os
-
-MASTER_URL = "https://zoom-master-production.up.railway.app"
-
-WORKER_ID = os.getenv("WORKER_ID", "worker-1")
-
-WORKER_URL = os.getenv(
-    "WORKER_URL",
-    "https://zoom-bot-account-1-production.up.railway.app"
-)
 
 # CORS
 app.add_middleware(
@@ -43,16 +31,17 @@ app.add_middleware(
 # ============================================
 # SCREENSHOT DIRECTORY
 # ============================================
-SCREENSHOT_DIR = Path("/app/screenshots")
-SCREENSHOT_DIR.mkdir(exist_ok=True)
+SCREENSHOT_DIR = Path("screenshots")
+SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
 
 # ============================================
 # INDIAN NAME GENERATOR
 # ============================================
 INDIAN_FIRST_NAMES = [
-    'Aarav', 'Vivaan', 'Aditya', 'Vihaan', 'Arjun', 'Reyansh', 'Ayaan', 'Krishna', 'Ishaan', 'Shaurya',
-    'Rahul', 'Rohan', 'Priya', 'Ananya', 'Diya', 'Saanvi', 'Aadhya', 'Kavya', 'Riya', 'Anika',
-    'Amit', 'Rajesh', 'Sneha', 'Pooja', 'Neha', 'Vikram', 'Karan', 'Manish', 'Suresh', 'Deepak'
+    'Aarav', 'Vivaan', 'Aditya', 'Vihaan', 'Arjun', 'Reyansh', 'Ayaan', 
+    'Krishna', 'Ishaan', 'Shaurya', 'Rahul', 'Rohan', 'Priya', 'Ananya',
+    'Diya', 'Saanvi', 'Aadhya', 'Kavya', 'Riya', 'Anika', 'Amit', 'Rajesh',
+    'Sneha', 'Pooja', 'Neha', 'Vikram', 'Karan', 'Manish', 'Suresh', 'Deepak'
 ]
 
 INDIAN_LAST_NAMES = [
@@ -81,8 +70,9 @@ def get_zoom_url(meeting_code):
 class StartBotRequest(BaseModel):
     meeting_code: str
     passcode: str = ""
-    bot_count: int
-    duration_minutes: int = 5
+    bot_count: int = 5
+    duration_minutes: int = 10
+    names: Optional[List[str]] = None
 
 # ============================================
 # SYNC BARRIER
@@ -120,7 +110,7 @@ async def take_screenshot(page, tag, step_name):
         await page.screenshot(path=str(filepath), full_page=True)
         print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - 📸 Screenshot: {filename}")
         return filename
-    except Exception as e:
+    except Exception:
         return None
 
 # ============================================
@@ -147,35 +137,18 @@ async def handle_popups(page, tag):
             except:
                 continue
 
-        join_popup_selectors = [
-            '//button[contains(text(), "Join") and contains(@class, "primary")]',
-            '//button[@type="submit"]',
-            '//button[contains(text(), "Join Now")]'
-        ]
-        
-        for selector in join_popup_selectors:
-            try:
-                join_btn = page.locator(f'xpath={selector}')
-                if await join_btn.count() > 0:
-                    await join_btn.first.click()
-                    print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - Join popup clicked")
-                    await asyncio.sleep(0.3)
-                    break
-            except:
-                continue
-
         try:
             await page.mouse.click(100, 100)
         except:
             pass
 
-    except Exception as e:
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - Popup error: {e}")
+    except Exception:
+        pass
 
 # ============================================
-# OPTIMIZED BOT FUNCTION - 5 BOTS VERSION
+# OPTIMIZED BOT FUNCTION
 # ============================================
-async def start_optimized(tag, wait_time, meetingcode, passcode):
+async def start_optimized(tag, wait_time, meetingcode, passcode, bot_name=None):
     global BOTS_FAILED
     
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - Started")
@@ -217,7 +190,7 @@ async def start_optimized(tag, wait_time, meetingcode, passcode):
             context = await browser.new_context(
                 viewport={"width": 800, "height": 600},
                 permissions=[],
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
             )
 
             page = await context.new_page()
@@ -231,6 +204,7 @@ async def start_optimized(tag, wait_time, meetingcode, passcode):
 
             # NAME INPUT
             try:
+                user_name = bot_name if bot_name else get_indian_name()
                 name_selectors = [
                     '//*[@id="input-for-name"]',
                     '//input[@placeholder="Enter your name"]',
@@ -243,18 +217,16 @@ async def start_optimized(tag, wait_time, meetingcode, passcode):
                         name_input = page.locator(f'xpath={selector}')
                         if await name_input.count() > 0:
                             await name_input.first.wait_for(state="visible", timeout=3000)
-                            user_name = get_indian_name()
                             await name_input.first.fill(user_name)
                             name_filled = True
-                            print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - Name entered: {user_name}")
+                            print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - Name: {user_name}")
                             await take_screenshot(page, tag, "02_name_filled")
                             break
                     except:
                         continue
                 
                 if not name_filled:
-                    await page.keyboard.type(get_indian_name())
-                    print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - Name typed")
+                    await page.keyboard.type(user_name)
                     await take_screenshot(page, tag, "02_name_typed")
                     
             except Exception as e:
@@ -270,8 +242,8 @@ async def start_optimized(tag, wait_time, meetingcode, passcode):
                         await pass_input.fill(passcode)
                         print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - Passcode entered")
                         await take_screenshot(page, tag, "03_passcode_filled")
-                except Exception as e:
-                    print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - Passcode error: {e}")
+                except Exception:
+                    pass
 
             # WAIT FOR ALL BOTS
             await wait_for_all_bots()
@@ -282,32 +254,25 @@ async def start_optimized(tag, wait_time, meetingcode, passcode):
                 join_btn = page.locator(f'xpath={join_xpath}')
                 if await join_btn.count() > 0:
                     await join_btn.click()
-                    print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - Join clicked")
                     await take_screenshot(page, tag, "04_join_clicked")
                 else:
                     await page.keyboard.press('Enter')
-                    print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - Enter pressed")
                     await take_screenshot(page, tag, "04_enter_pressed")
-            except Exception as e:
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - Join error: {e}")
+            except Exception:
                 await page.keyboard.press('Enter')
 
-            # WAIT AND STAY
             await asyncio.sleep(3)
             await handle_popups(page, tag)
             await take_screenshot(page, tag, "05_after_join")
             
-            # Audio join
             try:
                 audio_btn = page.locator('xpath=//button[contains(text(), "Join Audio")]')
                 if await audio_btn.count() > 0:
                     await audio_btn.click()
-                    print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - Audio joined")
                     await take_screenshot(page, tag, "06_audio_joined")
-            except Exception as e:
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - Audio error: {e}")
+            except Exception:
+                pass
 
-            # Check if in meeting
             await asyncio.sleep(2)
             try:
                 leave_btn = page.locator('xpath=//button[contains(text(), "Leave")]')
@@ -315,7 +280,7 @@ async def start_optimized(tag, wait_time, meetingcode, passcode):
                     print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - ✅ CONFIRMED: In meeting!")
                     await take_screenshot(page, tag, "07_confirmed_in_meeting")
                 else:
-                    print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - ⚠️ Not confirmed in meeting")
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - ⚠️ Not confirmed")
                     await take_screenshot(page, tag, "07_not_confirmed")
             except:
                 pass
@@ -352,28 +317,12 @@ async def start_optimized(tag, wait_time, meetingcode, passcode):
 # ============================================
 @app.get("/")
 async def root():
-    return {"message": "Zoom Bot API is running!", "status": "healthy"}
-
-@app.get("/screenshots")
-async def list_screenshots():
-    try:
-        files = [f.name for f in SCREENSHOT_DIR.iterdir() if f.is_file()]
-        return {"screenshots": sorted(files), "count": len(files)}
-    except:
-        return {"screenshots": [], "count": 0}
-
-@app.get("/screenshots/{filename}")
-async def get_screenshot(filename: str):
-    filepath = SCREENSHOT_DIR / filename
-    if not filepath.exists():
-        raise HTTPException(status_code=404, detail="Screenshot not found")
-    return FileResponse(filepath, media_type="image/png", filename=filename)
+    return {"message": "Zoom Bot Worker is running!", "status": "healthy"}
 
 @app.post("/api/start-bots")
 async def start_bots(request: StartBotRequest):
     global BOTS_TOTAL, BOTS_READY, BOTS_FAILED
     try:
-        # MAX 5 BOTS PER PROJECT
         if request.bot_count < 1 or request.bot_count > 5:
             raise HTTPException(status_code=400, detail="Bot count must be between 1 and 5")
         
@@ -387,7 +336,8 @@ async def start_bots(request: StartBotRequest):
                 request.meeting_code, 
                 request.passcode, 
                 request.bot_count, 
-                request.duration_minutes
+                request.duration_minutes,
+                request.names
             ))
         
         thread = threading.Thread(target=run_bots)
@@ -403,60 +353,26 @@ async def start_bots(request: StartBotRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-async def run_bot_tasks(meeting_code, passcode, bot_count, duration_minutes):
+async def run_bot_tasks(meeting_code, passcode, bot_count, duration_minutes, names=None):
     duration_seconds = duration_minutes * 60
     tasks = []
     for i in range(bot_count):
         tag = f"Bot-{i+1}"
+        bot_name = names[i] if names and i < len(names) else None
         task = asyncio.create_task(
-            start_optimized(tag, duration_seconds, meeting_code, passcode)
+            start_optimized(tag, duration_seconds, meeting_code, passcode, bot_name)
         )
         tasks.append(task)
-        await asyncio.sleep(1.5)  # 1.5 second gap
+        await asyncio.sleep(1.5)
     
     await asyncio.gather(*tasks)
 
-# ============================================
-# AUTO REGISTER WITH MASTER
-# ============================================
-
-@app.on_event("startup")
-async def register_with_master():
-
-    try:
-
-        async with httpx.AsyncClient(timeout=20) as client:
-
-            response = await client.post(
-                MASTER_URL + "/register",
-                json={
-                    "worker_id": WORKER_ID,
-                    "url": WORKER_URL,
-                    "capacity": 5
-                }
-            )
-
-            print("===================================")
-            print("REGISTERED WITH MASTER")
-            print(response.text)
-            print("===================================")
-
-    except Exception as e:
-
-        print("===================================")
-        print("MASTER REGISTRATION FAILED")
-        print(e)
-        print("===================================")
-
-
 @app.get("/health")
 async def health():
-
     return {
         "online": True,
-        "busy": False,
         "capacity": 5,
-        "worker_id": WORKER_ID
+        "worker_id": "worker"
     }
 
 if __name__ == "__main__":
