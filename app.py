@@ -9,6 +9,7 @@ import random
 import base64
 import gc
 import signal
+import psutil
 from datetime import datetime
 from playwright.async_api import async_playwright
 import nest_asyncio
@@ -92,8 +93,8 @@ class StopBotRequest(BaseModel):
 # ============================================
 # STATE
 # ============================================
-active_browsers = {}
-active_browser_pids = {}
+active_browsers = {}  # tag -> browser object
+active_browser_pids = {}  # tag -> pid
 active_meetings = {}
 billing_enabled = True
 
@@ -125,19 +126,26 @@ async def wait_for_all_bots():
 # ============================================
 # INSTANT KILL - Force Kill Browser Process
 # ============================================
-def force_kill_browser(pid):
-    try:
-        if pid:
-            os.kill(pid, signal.SIGKILL)
-            return True
-    except:
-        pass
-    return False
+def kill_all_browser_processes(meeting_code):
+    """Kill all Chromium processes associated with this meeting using psutil"""
+    killed = 0
+    for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+        try:
+            cmdline = ' '.join(proc.info['cmdline'] or [])
+            if 'chromium' in cmdline.lower() or 'chrome' in cmdline.lower():
+                if meeting_code in cmdline or any(tag.startswith(meeting_code) for tag in active_browser_pids.keys()):
+                    proc.kill()
+                    killed += 1
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+    return killed
 
 async def kill_meeting_browsers(meeting_code):
+    """Kill all browsers for a meeting instantly"""
     killed = 0
     tags_to_remove = []
     
+    # First, try graceful close via playwright
     for tag, browser in list(active_browsers.items()):
         if tag.startswith(meeting_code):
             try:
@@ -145,15 +153,26 @@ async def kill_meeting_browsers(meeting_code):
                 killed += 1
                 tags_to_remove.append(tag)
             except:
-                if tag in active_browser_pids:
-                    if force_kill_browser(active_browser_pids[tag]):
-                        killed += 1
-                        tags_to_remove.append(tag)
+                # If graceful fails, we'll kill via psutil later
+                pass
     
+    # Remove tags that were closed gracefully
     for tag in tags_to_remove:
-        del active_browsers[tag]
+        if tag in active_browsers:
+            del active_browsers[tag]
         if tag in active_browser_pids:
             del active_browser_pids[tag]
+    
+    # Force kill any remaining processes using psutil
+    killed += kill_all_browser_processes(meeting_code)
+    
+    # Clean up any remaining tags
+    for tag in list(active_browser_pids.keys()):
+        if tag.startswith(meeting_code):
+            del active_browser_pids[tag]
+    for tag in list(active_browsers.keys()):
+        if tag.startswith(meeting_code):
+            del active_browsers[tag]
     
     return killed
 
