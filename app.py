@@ -14,6 +14,7 @@ import nest_asyncio
 import uvicorn
 from typing import List, Optional
 from pathlib import Path
+from faker import Faker
 
 nest_asyncio.apply()
 
@@ -35,53 +36,32 @@ SCREENSHOT_DIR = Path("screenshots")
 SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
 
 # ============================================
-# INDIAN NAMES
+# ULTRA-FAST NAME GENERATORS
 # ============================================
-INDIAN_FIRST_NAMES = [
-    'Aarav', 'Vivaan', 'Aditya', 'Vihaan', 'Arjun', 'Reyansh', 'Ayaan', 
-    'Krishna', 'Ishaan', 'Shaurya', 'Rahul', 'Rohan', 'Priya', 'Ananya',
-    'Diya', 'Saanvi', 'Aadhya', 'Kavya', 'Riya', 'Anika', 'Amit', 'Rajesh',
-    'Sneha', 'Pooja', 'Neha', 'Vikram', 'Karan', 'Manish', 'Suresh', 'Deepak'
-]
 
-INDIAN_LAST_NAMES = [
-    'Sharma', 'Verma', 'Patel', 'Kumar', 'Singh', 'Reddy', 'Gupta', 'Joshi',
-    'Malhotra', 'Mehta', 'Chopra', 'Khanna', 'Agarwal', 'Jain', 'Saxena',
-    'Bansal', 'Srivastava', 'Mishra', 'Pandey', 'Rao', 'Desai', 'Nair'
-]
+# Pre-load Faker with multiple locales for speed
+fake_indian = Faker('en_IN')
+fake_english = Faker('en_US')
 
-# ============================================
-# ENGLISH NAMES (Faker)
-# ============================================
-ENGLISH_FIRST_NAMES = [
-    'James', 'John', 'Robert', 'Michael', 'William', 'David', 'Richard', 'Joseph',
-    'Thomas', 'Charles', 'Christopher', 'Daniel', 'Matthew', 'Anthony', 'Donald',
-    'Mark', 'Paul', 'Steven', 'Andrew', 'Kenneth', 'Joshua', 'Kevin', 'Brian',
-    'George', 'Timothy', 'Ronald', 'Edward', 'Jason', 'Jeffrey', 'Ryan', 'Jacob',
-    'Gary', 'Nicholas', 'Eric', 'Jonathan', 'Stephen', 'Larry', 'Justin', 'Scott',
-    'Brandon', 'Benjamin', 'Samuel', 'Raymond', 'Gregory', 'Frank', 'Alexander',
-    'Patrick', 'Jack', 'Dennis', 'Jerry', 'Tyler', 'Aaron', 'Jose', 'Adam',
-    'Nathan', 'Henry', 'Zachary', 'Todd', 'Peter', 'Kyle', 'Ethan', 'Noah'
-]
+# Cached name pools for ultra-fast generation
+INDIAN_NAME_POOL = []
+ENGLISH_NAME_POOL = []
 
-ENGLISH_LAST_NAMES = [
-    'Smith', 'Johnson', 'Williams', 'Brown', 'Jones', 'Garcia', 'Miller', 'Davis',
-    'Rodriguez', 'Martinez', 'Hernandez', 'Lopez', 'Wilson', 'Anderson', 'Thomas',
-    'Taylor', 'Moore', 'Jackson', 'Martin', 'Lee', 'Perez', 'Thompson', 'White',
-    'Harris', 'Sanchez', 'Clark', 'Ramirez', 'Lewis', 'Robinson', 'Walker', 'Young',
-    'Allen', 'King', 'Wright', 'Scott', 'Torres', 'Nguyen', 'Hill', 'Flores',
-    'Green', 'Adams', 'Nelson', 'Baker', 'Hall', 'Rivera', 'Campbell', 'Mitchell',
-    'Carter', 'Roberts', 'Turner', 'Phillips', 'Evans', 'Collins', 'Edwards',
-    'Stewart', 'Morris', 'Murphy', 'Cook', 'Rogers', 'Morgan', 'Peterson', 'Cooper'
-]
+# Generate 1000 names at startup for caching
+for _ in range(1000):
+    INDIAN_NAME_POOL.append(fake_indian.name())
+    ENGLISH_NAME_POOL.append(fake_english.name())
 
 def get_indian_name():
-    return f"{random.choice(INDIAN_FIRST_NAMES)} {random.choice(INDIAN_LAST_NAMES)}"
+    """Ultra-fast Indian name - uses cached pool"""
+    return random.choice(INDIAN_NAME_POOL)
 
 def get_english_name():
-    return f"{random.choice(ENGLISH_FIRST_NAMES)} {random.choice(ENGLISH_LAST_NAMES)}"
+    """Ultra-fast English name - uses cached pool"""
+    return random.choice(ENGLISH_NAME_POOL)
 
 def get_name(name_type, custom_names=None, index=0):
+    """Get name based on type - ultra fast"""
     if name_type == "custom" and custom_names and index < len(custom_names):
         return custom_names[index]
     elif name_type == "english":
@@ -101,7 +81,7 @@ def get_zoom_url(meeting_code):
     return f"https://{ZOOM_PARTS['domain']}/{ZOOM_PARTS['join_path']}/{meeting_code}"
 
 # ============================================
-# REQUEST MODEL
+# REQUEST MODELS
 # ============================================
 class StartBotRequest(BaseModel):
     meeting_code: str
@@ -147,7 +127,7 @@ async def wait_for_all_bots():
     await READY_TO_JOIN.wait()
 
 # ============================================
-# BOT FUNCTION
+# BOT FUNCTION - OPTIMIZED FOR SPEED
 # ============================================
 async def start_bot(tag, wait_time, meetingcode, passcode, name_type, custom_names, index):
     global BOTS_FAILED
@@ -200,9 +180,9 @@ async def start_bot(tag, wait_time, meetingcode, passcode, name_type, custom_nam
             zoom_url = get_zoom_url(meetingcode)
             
             await page.goto(zoom_url, timeout=60000)
-            await asyncio.sleep(2)
+            await asyncio.sleep(1.5)  # Reduced sleep for speed
 
-            # NAME INPUT
+            # NAME INPUT - Ultra fast
             try:
                 user_name = get_name(name_type, custom_names, index)
                 name_selectors = [
@@ -216,7 +196,7 @@ async def start_bot(tag, wait_time, meetingcode, passcode, name_type, custom_nam
                     try:
                         name_input = page.locator(f'xpath={selector}')
                         if await name_input.count() > 0:
-                            await name_input.first.wait_for(state="visible", timeout=3000)
+                            await name_input.first.wait_for(state="visible", timeout=2000)
                             await name_input.first.fill(user_name)
                             name_filled = True
                             print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - Name: {user_name}")
@@ -233,7 +213,7 @@ async def start_bot(tag, wait_time, meetingcode, passcode, name_type, custom_nam
             # PASSCODE INPUT
             if passcode and passcode != "" and passcode != "0":
                 try:
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(0.3)
                     passcode_xpath = '/html/body/div[2]/div[1]/div/div[1]/div/div[2]/div[2]/div/input'
                     pass_input = page.locator(f'xpath={passcode_xpath}')
                     if await pass_input.count() > 0:
@@ -259,7 +239,7 @@ async def start_bot(tag, wait_time, meetingcode, passcode, name_type, custom_nam
                 print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - Join error: {e}")
                 await page.keyboard.press('Enter')
 
-            await asyncio.sleep(3)
+            await asyncio.sleep(2)  # Reduced wait
             
             # Audio join
             try:
@@ -270,7 +250,7 @@ async def start_bot(tag, wait_time, meetingcode, passcode, name_type, custom_nam
             except Exception:
                 pass
 
-            await asyncio.sleep(2)
+            await asyncio.sleep(1)
             try:
                 leave_btn = page.locator('xpath=//button[contains(text(), "Leave")]')
                 if await leave_btn.count() > 0:
@@ -379,7 +359,7 @@ async def run_bot_tasks(meeting_code, passcode, bot_count, duration_minutes, nam
             start_bot(tag, duration_seconds, meeting_code, passcode, name_type, custom_names, i)
         )
         tasks.append(task)
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.3)  # Faster start
     
     await asyncio.gather(*tasks)
     
@@ -392,7 +372,6 @@ async def stop_bots(request: StopBotRequest):
     """Kill all bots for a meeting immediately"""
     meeting_code = request.meeting_code
     
-    # Kill all browsers for this meeting
     killed = 0
     tags_to_remove = []
     
@@ -408,7 +387,6 @@ async def stop_bots(request: StopBotRequest):
     for tag in tags_to_remove:
         del active_browsers[tag]
     
-    # Update meeting status
     if meeting_code in active_meetings:
         active_meetings[meeting_code]["status"] = "killed"
         active_meetings[meeting_code]["killed_at"] = datetime.now().isoformat()
