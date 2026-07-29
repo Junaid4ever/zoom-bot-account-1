@@ -8,6 +8,7 @@ import os
 import random
 import base64
 import gc
+import signal
 from datetime import datetime
 from playwright.async_api import async_playwright
 import nest_asyncio
@@ -39,29 +40,23 @@ SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
 # ULTRA-FAST NAME GENERATORS
 # ============================================
 
-# Pre-load Faker with multiple locales for speed
 fake_indian = Faker('en_IN')
 fake_english = Faker('en_US')
 
-# Cached name pools for ultra-fast generation
 INDIAN_NAME_POOL = []
 ENGLISH_NAME_POOL = []
 
-# Generate 1000 names at startup for caching
-for _ in range(1000):
+for _ in range(2000):
     INDIAN_NAME_POOL.append(fake_indian.name())
     ENGLISH_NAME_POOL.append(fake_english.name())
 
 def get_indian_name():
-    """Ultra-fast Indian name - uses cached pool"""
     return random.choice(INDIAN_NAME_POOL)
 
 def get_english_name():
-    """Ultra-fast English name - uses cached pool"""
     return random.choice(ENGLISH_NAME_POOL)
 
 def get_name(name_type, custom_names=None, index=0):
-    """Get name based on type - ultra fast"""
     if name_type == "custom" and custom_names and index < len(custom_names):
         return custom_names[index]
     elif name_type == "english":
@@ -98,8 +93,10 @@ class StopBotRequest(BaseModel):
 # STATE
 # ============================================
 active_browsers = {}
+active_browser_pids = {}
 active_meetings = {}
 billing_enabled = True
+stop_events = {}
 
 # ============================================
 # SYNC BARRIER
@@ -127,7 +124,46 @@ async def wait_for_all_bots():
     await READY_TO_JOIN.wait()
 
 # ============================================
-# BOT FUNCTION - OPTIMIZED FOR SPEED
+# INSTANT KILL - Force Kill Browser Process
+# ============================================
+def force_kill_browser(pid):
+    """Force kill a browser process immediately"""
+    try:
+        if pid:
+            os.kill(pid, signal.SIGKILL)
+            return True
+    except:
+        pass
+    return False
+
+async def kill_meeting_browsers(meeting_code):
+    """Kill all browsers for a meeting instantly"""
+    killed = 0
+    tags_to_remove = []
+    
+    for tag, browser in list(active_browsers.items()):
+        if tag.startswith(meeting_code):
+            try:
+                # Try graceful close first
+                await browser.close()
+                killed += 1
+                tags_to_remove.append(tag)
+            except:
+                # Force kill if graceful fails
+                if tag in active_browser_pids:
+                    if force_kill_browser(active_browser_pids[tag]):
+                        killed += 1
+                        tags_to_remove.append(tag)
+    
+    for tag in tags_to_remove:
+        del active_browsers[tag]
+        if tag in active_browser_pids:
+            del active_browser_pids[tag]
+    
+    return killed
+
+# ============================================
+# BOT FUNCTION - WITH INSTANT KILL
 # ============================================
 async def start_bot(tag, wait_time, meetingcode, passcode, name_type, custom_names, index):
     global BOTS_FAILED
@@ -168,7 +204,11 @@ async def start_bot(tag, wait_time, meetingcode, passcode, name_type, custom_nam
                 ]
             )
 
+            # Store browser and PID for instant kill
             active_browsers[tag] = browser
+            # Get PID from browser process
+            if hasattr(browser, 'process') and browser.process:
+                active_browser_pids[tag] = browser.process.pid
 
             context = await browser.new_context(
                 viewport={"width": 800, "height": 600},
@@ -180,9 +220,9 @@ async def start_bot(tag, wait_time, meetingcode, passcode, name_type, custom_nam
             zoom_url = get_zoom_url(meetingcode)
             
             await page.goto(zoom_url, timeout=60000)
-            await asyncio.sleep(1.5)  # Reduced sleep for speed
+            await asyncio.sleep(1.5)
 
-            # NAME INPUT - Ultra fast
+            # NAME INPUT
             try:
                 user_name = get_name(name_type, custom_names, index)
                 name_selectors = [
@@ -239,7 +279,7 @@ async def start_bot(tag, wait_time, meetingcode, passcode, name_type, custom_nam
                 print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - Join error: {e}")
                 await page.keyboard.press('Enter')
 
-            await asyncio.sleep(2)  # Reduced wait
+            await asyncio.sleep(2)
             
             # Audio join
             try:
@@ -260,9 +300,10 @@ async def start_bot(tag, wait_time, meetingcode, passcode, name_type, custom_nam
 
             print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - Joined! Staying for {wait_time//60} minutes")
             
-            # STAY IN MEETING
+            # STAY IN MEETING - with kill check
             elapsed = 0
             while elapsed < wait_time:
+                # Check if billing is disabled
                 if not billing_enabled:
                     print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - Billing disabled, stopping...")
                     break
@@ -287,12 +328,16 @@ async def start_bot(tag, wait_time, meetingcode, passcode, name_type, custom_nam
             
             if tag in active_browsers:
                 del active_browsers[tag]
+            if tag in active_browser_pids:
+                del active_browser_pids[tag]
             
     except Exception as e:
         print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - Failed: {str(e)[:100]}")
         BOTS_FAILED += 1
         if tag in active_browsers:
             del active_browsers[tag]
+        if tag in active_browser_pids:
+            del active_browser_pids[tag]
 
 # ============================================
 # API ENDPOINTS
@@ -359,7 +404,7 @@ async def run_bot_tasks(meeting_code, passcode, bot_count, duration_minutes, nam
             start_bot(tag, duration_seconds, meeting_code, passcode, name_type, custom_names, i)
         )
         tasks.append(task)
-        await asyncio.sleep(0.3)  # Faster start
+        await asyncio.sleep(0.3)
     
     await asyncio.gather(*tasks)
     
@@ -369,23 +414,10 @@ async def run_bot_tasks(meeting_code, passcode, bot_count, duration_minutes, nam
 
 @app.post("/api/stop-bots")
 async def stop_bots(request: StopBotRequest):
-    """Kill all bots for a meeting immediately"""
+    """Kill all bots for a meeting instantly"""
     meeting_code = request.meeting_code
     
-    killed = 0
-    tags_to_remove = []
-    
-    for tag, browser in list(active_browsers.items()):
-        if tag.startswith(meeting_code):
-            try:
-                await browser.close()
-                killed += 1
-                tags_to_remove.append(tag)
-            except:
-                pass
-    
-    for tag in tags_to_remove:
-        del active_browsers[tag]
+    killed = await kill_meeting_browsers(meeting_code)
     
     if meeting_code in active_meetings:
         active_meetings[meeting_code]["status"] = "killed"
@@ -393,7 +425,7 @@ async def stop_bots(request: StopBotRequest):
     
     return {
         "success": True,
-        "message": f"Stopped {killed} bots for meeting {meeting_code}",
+        "message": f"Instantly killed {killed} bots for meeting {meeting_code}",
         "bots_killed": killed
     }
 
