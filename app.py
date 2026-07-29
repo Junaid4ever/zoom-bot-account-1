@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 import threading
 import asyncio
@@ -8,9 +8,7 @@ import os
 import random
 import base64
 import gc
-import signal
-import psutil
-from datetime import datetime, timedelta
+from datetime import datetime
 from playwright.async_api import async_playwright
 import nest_asyncio
 import uvicorn
@@ -52,18 +50,29 @@ INDIAN_LAST_NAMES = [
     'Bansal', 'Srivastava', 'Mishra', 'Pandey', 'Rao', 'Desai', 'Nair'
 ]
 
+# ============================================
+# ENGLISH NAMES (Faker)
+# ============================================
 ENGLISH_FIRST_NAMES = [
     'James', 'John', 'Robert', 'Michael', 'William', 'David', 'Richard', 'Joseph',
     'Thomas', 'Charles', 'Christopher', 'Daniel', 'Matthew', 'Anthony', 'Donald',
     'Mark', 'Paul', 'Steven', 'Andrew', 'Kenneth', 'Joshua', 'Kevin', 'Brian',
-    'George', 'Timothy', 'Ronald', 'Edward', 'Jason', 'Jeffrey', 'Ryan', 'Jacob'
+    'George', 'Timothy', 'Ronald', 'Edward', 'Jason', 'Jeffrey', 'Ryan', 'Jacob',
+    'Gary', 'Nicholas', 'Eric', 'Jonathan', 'Stephen', 'Larry', 'Justin', 'Scott',
+    'Brandon', 'Benjamin', 'Samuel', 'Raymond', 'Gregory', 'Frank', 'Alexander',
+    'Patrick', 'Jack', 'Dennis', 'Jerry', 'Tyler', 'Aaron', 'Jose', 'Adam',
+    'Nathan', 'Henry', 'Zachary', 'Todd', 'Peter', 'Kyle', 'Ethan', 'Noah'
 ]
 
 ENGLISH_LAST_NAMES = [
     'Smith', 'Johnson', 'Williams', 'Brown', 'Jones', 'Garcia', 'Miller', 'Davis',
     'Rodriguez', 'Martinez', 'Hernandez', 'Lopez', 'Wilson', 'Anderson', 'Thomas',
     'Taylor', 'Moore', 'Jackson', 'Martin', 'Lee', 'Perez', 'Thompson', 'White',
-    'Harris', 'Sanchez', 'Clark', 'Ramirez', 'Lewis', 'Robinson', 'Walker', 'Young'
+    'Harris', 'Sanchez', 'Clark', 'Ramirez', 'Lewis', 'Robinson', 'Walker', 'Young',
+    'Allen', 'King', 'Wright', 'Scott', 'Torres', 'Nguyen', 'Hill', 'Flores',
+    'Green', 'Adams', 'Nelson', 'Baker', 'Hall', 'Rivera', 'Campbell', 'Mitchell',
+    'Carter', 'Roberts', 'Turner', 'Phillips', 'Evans', 'Collins', 'Edwards',
+    'Stewart', 'Morris', 'Murphy', 'Cook', 'Rogers', 'Morgan', 'Peterson', 'Cooper'
 ]
 
 def get_indian_name():
@@ -72,10 +81,13 @@ def get_indian_name():
 def get_english_name():
     return f"{random.choice(ENGLISH_FIRST_NAMES)} {random.choice(ENGLISH_LAST_NAMES)}"
 
-def get_name(name_type):
-    if name_type == "english":
+def get_name(name_type, custom_names=None, index=0):
+    if name_type == "custom" and custom_names and index < len(custom_names):
+        return custom_names[index]
+    elif name_type == "english":
         return get_english_name()
-    return get_indian_name()
+    else:
+        return get_indian_name()
 
 # ============================================
 # ZOOM URL
@@ -94,9 +106,10 @@ def get_zoom_url(meeting_code):
 class StartBotRequest(BaseModel):
     meeting_code: str
     passcode: str = ""
-    bot_count: int
-    duration_minutes: int = 5
+    bot_count: int = 5
+    duration_minutes: int = 10
     name_type: str = "indian"
+    custom_names: Optional[List[str]] = None
 
 class StopBotRequest(BaseModel):
     meeting_code: str
@@ -104,9 +117,8 @@ class StopBotRequest(BaseModel):
 # ============================================
 # STATE
 # ============================================
-active_browsers = {}  # tag -> browser object
-active_meetings = {}  # meeting_code -> {start_time, bots, timeout, status}
-meeting_timers = {}   # meeting_code -> timer thread
+active_browsers = {}
+active_meetings = {}
 billing_enabled = True
 
 # ============================================
@@ -135,47 +147,9 @@ async def wait_for_all_bots():
     await READY_TO_JOIN.wait()
 
 # ============================================
-# KILL ALL BROWSERS
-# ============================================
-def kill_all_browsers():
-    """Kill all browser processes immediately"""
-    killed = 0
-    for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
-        try:
-            cmdline = ' '.join(proc.info['cmdline'] or [])
-            if 'chromium' in cmdline.lower() or 'chrome' in cmdline.lower():
-                if 'playwright' in cmdline.lower():
-                    proc.kill()
-                    killed += 1
-        except:
-            pass
-    return killed
-
-async def kill_meeting_browsers(meeting_code):
-    """Kill all browsers associated with a meeting"""
-    killed = 0
-    tags_to_remove = []
-    
-    for tag, browser in list(active_browsers.items()):
-        if tag.startswith(meeting_code):
-            try:
-                await browser.close()
-                killed += 1
-                tags_to_remove.append(tag)
-            except:
-                pass
-    
-    for tag in tags_to_remove:
-        del active_browsers[tag]
-    
-    # Kill any leftover processes
-    killed += kill_all_browsers()
-    return killed
-
-# ============================================
 # BOT FUNCTION
 # ============================================
-async def start_bot(tag, wait_time, meetingcode, passcode, name_type="indian"):
+async def start_bot(tag, wait_time, meetingcode, passcode, name_type, custom_names, index):
     global BOTS_FAILED
     
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - Started")
@@ -214,7 +188,6 @@ async def start_bot(tag, wait_time, meetingcode, passcode, name_type="indian"):
                 ]
             )
 
-            # Store browser reference
             active_browsers[tag] = browser
 
             context = await browser.new_context(
@@ -231,7 +204,7 @@ async def start_bot(tag, wait_time, meetingcode, passcode, name_type="indian"):
 
             # NAME INPUT
             try:
-                user_name = get_name(name_type)
+                user_name = get_name(name_type, custom_names, index)
                 name_selectors = [
                     '//*[@id="input-for-name"]',
                     '//input[@placeholder="Enter your name"]',
@@ -310,7 +283,6 @@ async def start_bot(tag, wait_time, meetingcode, passcode, name_type="indian"):
             # STAY IN MEETING
             elapsed = 0
             while elapsed < wait_time:
-                # Check if billing is disabled
                 if not billing_enabled:
                     print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - Billing disabled, stopping...")
                     break
@@ -333,7 +305,6 @@ async def start_bot(tag, wait_time, meetingcode, passcode, name_type="indian"):
             await browser.close()
             gc.collect()
             
-            # Remove from active browsers
             if tag in active_browsers:
                 del active_browsers[tag]
             
@@ -366,14 +337,12 @@ async def start_bots(request: StartBotRequest):
         BOTS_FAILED = 0
         READY_TO_JOIN.clear()
         
-        # Track meeting
         if request.meeting_code not in active_meetings:
             active_meetings[request.meeting_code] = {
                 "start_time": datetime.now(),
                 "bots": request.bot_count,
                 "duration": request.duration_minutes,
-                "status": "running",
-                "name_type": request.name_type
+                "status": "running"
             }
         else:
             active_meetings[request.meeting_code]["status"] = "running"
@@ -384,7 +353,8 @@ async def start_bots(request: StartBotRequest):
                 request.passcode, 
                 request.bot_count, 
                 request.duration_minutes,
-                request.name_type
+                request.name_type,
+                request.custom_names
             ))
         
         thread = threading.Thread(target=run_bots)
@@ -400,20 +370,19 @@ async def start_bots(request: StartBotRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-async def run_bot_tasks(meeting_code, passcode, bot_count, duration_minutes, name_type):
+async def run_bot_tasks(meeting_code, passcode, bot_count, duration_minutes, name_type, custom_names):
     duration_seconds = duration_minutes * 60
     tasks = []
     for i in range(bot_count):
         tag = f"{meeting_code}-Bot-{i+1}"
         task = asyncio.create_task(
-            start_bot(tag, duration_seconds, meeting_code, passcode, name_type)
+            start_bot(tag, duration_seconds, meeting_code, passcode, name_type, custom_names, i)
         )
         tasks.append(task)
         await asyncio.sleep(0.5)
     
     await asyncio.gather(*tasks)
     
-    # Update meeting status
     if meeting_code in active_meetings:
         active_meetings[meeting_code]["status"] = "completed"
         active_meetings[meeting_code]["completed_at"] = datetime.now().isoformat()
@@ -423,8 +392,21 @@ async def stop_bots(request: StopBotRequest):
     """Kill all bots for a meeting immediately"""
     meeting_code = request.meeting_code
     
-    # Kill all browsers
-    killed = await kill_meeting_browsers(meeting_code)
+    # Kill all browsers for this meeting
+    killed = 0
+    tags_to_remove = []
+    
+    for tag, browser in list(active_browsers.items()):
+        if tag.startswith(meeting_code):
+            try:
+                await browser.close()
+                killed += 1
+                tags_to_remove.append(tag)
+            except:
+                pass
+    
+    for tag in tags_to_remove:
+        del active_browsers[tag]
     
     # Update meeting status
     if meeting_code in active_meetings:
@@ -437,54 +419,12 @@ async def stop_bots(request: StopBotRequest):
         "bots_killed": killed
     }
 
-@app.post("/api/toggle-billing")
-async def toggle_billing(request: dict):
-    global billing_enabled
-    
-    enabled = request.get("enabled", True)
-    billing_enabled = enabled
-    
-    if not enabled:
-        # Kill all active meetings
-        killed_total = 0
-        for meeting_code in list(active_meetings.keys()):
-            if active_meetings[meeting_code]["status"] == "running":
-                killed = await kill_meeting_browsers(meeting_code)
-                killed_total += killed
-                active_meetings[meeting_code]["status"] = "paused"
-                active_meetings[meeting_code]["paused_at"] = datetime.now().isoformat()
-        
-        return {
-            "success": True,
-            "billing_enabled": False,
-            "message": f"Billing disabled. Killed {killed_total} bots.",
-            "bots_killed": killed_total
-        }
-    
-    return {
-        "success": True,
-        "billing_enabled": True,
-        "message": "Billing enabled. System ready."
-    }
-
 @app.get("/api/status")
 async def get_status():
-    running_bots = len(active_browsers)
-    
-    # Clean up completed meetings older than 1 hour
-    for code, meeting in list(active_meetings.items()):
-        if meeting["status"] in ["completed", "killed"]:
-            if "completed_at" in meeting:
-                completed_time = datetime.fromisoformat(meeting["completed_at"])
-                if (datetime.now() - completed_time).seconds > 3600:
-                    del active_meetings[code]
-    
     return {
         "billing_enabled": billing_enabled,
         "active_meetings": active_meetings,
-        "running_bots": running_bots,
-        "total_bots": sum(m["bots"] for m in active_meetings.values()),
-        "meetings": list(active_meetings.keys())
+        "running_bots": len(active_browsers)
     }
 
 @app.get("/health")
