@@ -82,7 +82,7 @@ class StartBotRequest(BaseModel):
     meeting_code: str
     passcode: str = ""
     bot_count: int = 5
-    duration_minutes: int = 10
+    duration_minutes: int = 60
     name_type: str = "indian"
     custom_names: Optional[List[str]] = None
 
@@ -96,7 +96,6 @@ active_browsers = {}
 active_browser_pids = {}
 active_meetings = {}
 billing_enabled = True
-stop_events = {}
 
 # ============================================
 # SYNC BARRIER
@@ -127,7 +126,6 @@ async def wait_for_all_bots():
 # INSTANT KILL - Force Kill Browser Process
 # ============================================
 def force_kill_browser(pid):
-    """Force kill a browser process immediately"""
     try:
         if pid:
             os.kill(pid, signal.SIGKILL)
@@ -137,19 +135,16 @@ def force_kill_browser(pid):
     return False
 
 async def kill_meeting_browsers(meeting_code):
-    """Kill all browsers for a meeting instantly"""
     killed = 0
     tags_to_remove = []
     
     for tag, browser in list(active_browsers.items()):
         if tag.startswith(meeting_code):
             try:
-                # Try graceful close first
                 await browser.close()
                 killed += 1
                 tags_to_remove.append(tag)
             except:
-                # Force kill if graceful fails
                 if tag in active_browser_pids:
                     if force_kill_browser(active_browser_pids[tag]):
                         killed += 1
@@ -163,7 +158,7 @@ async def kill_meeting_browsers(meeting_code):
     return killed
 
 # ============================================
-# BOT FUNCTION - WITH INSTANT KILL
+# BOT FUNCTION - WITH DETAILED LOGS
 # ============================================
 async def start_bot(tag, wait_time, meetingcode, passcode, name_type, custom_names, index):
     global BOTS_FAILED
@@ -204,9 +199,7 @@ async def start_bot(tag, wait_time, meetingcode, passcode, name_type, custom_nam
                 ]
             )
 
-            # Store browser and PID for instant kill
             active_browsers[tag] = browser
-            # Get PID from browser process
             if hasattr(browser, 'process') and browser.process:
                 active_browser_pids[tag] = browser.process.pid
 
@@ -219,6 +212,7 @@ async def start_bot(tag, wait_time, meetingcode, passcode, name_type, custom_nam
             page = await context.new_page()
             zoom_url = get_zoom_url(meetingcode)
             
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - Navigating to Zoom...")
             await page.goto(zoom_url, timeout=60000)
             await asyncio.sleep(1.5)
 
@@ -239,19 +233,20 @@ async def start_bot(tag, wait_time, meetingcode, passcode, name_type, custom_nam
                             await name_input.first.wait_for(state="visible", timeout=2000)
                             await name_input.first.fill(user_name)
                             name_filled = True
-                            print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - Name: {user_name}")
+                            print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - Name entered: {user_name}")
                             break
                     except:
                         continue
                 
                 if not name_filled:
                     await page.keyboard.type(user_name)
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - Name typed: {user_name}")
                     
             except Exception as e:
                 print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - Name error: {e}")
 
             # PASSCODE INPUT
-            if passcode and passcode != "" and passcode != "0":
+            if passcode is not None and passcode != "":
                 try:
                     await asyncio.sleep(0.3)
                     passcode_xpath = '/html/body/div[2]/div[1]/div/div[1]/div/div[2]/div[2]/div/input'
@@ -259,10 +254,11 @@ async def start_bot(tag, wait_time, meetingcode, passcode, name_type, custom_nam
                     if await pass_input.count() > 0:
                         await pass_input.fill(passcode)
                         print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - Passcode entered")
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - Passcode error: {e}")
 
             # WAIT FOR ALL BOTS
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - Waiting for all bots...")
             await wait_for_all_bots()
 
             # JOIN BUTTON
@@ -274,7 +270,7 @@ async def start_bot(tag, wait_time, meetingcode, passcode, name_type, custom_nam
                     print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - Join clicked")
                 else:
                     await page.keyboard.press('Enter')
-                    print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - Enter pressed")
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - Enter pressed for join")
             except Exception as e:
                 print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - Join error: {e}")
                 await page.keyboard.press('Enter')
@@ -287,23 +283,24 @@ async def start_bot(tag, wait_time, meetingcode, passcode, name_type, custom_nam
                 if await audio_btn.count() > 0:
                     await audio_btn.click()
                     print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - Audio joined")
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - Audio error: {e}")
 
             await asyncio.sleep(1)
             try:
                 leave_btn = page.locator('xpath=//button[contains(text(), "Leave")]')
                 if await leave_btn.count() > 0:
                     print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - CONFIRMED: In meeting!")
+                else:
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - Warning: Not confirmed in meeting")
             except:
                 pass
 
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - Joined! Staying for {wait_time//60} minutes")
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - ✅ Joined! Staying for {wait_time//60} minutes")
             
-            # STAY IN MEETING - with kill check
+            # STAY IN MEETING
             elapsed = 0
             while elapsed < wait_time:
-                # Check if billing is disabled
                 if not billing_enabled:
                     print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - Billing disabled, stopping...")
                     break
