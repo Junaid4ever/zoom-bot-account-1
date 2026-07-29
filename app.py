@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 import threading
 import asyncio
@@ -8,11 +8,13 @@ import os
 import random
 import base64
 import gc
-import time
-from datetime import datetime
+import signal
+import psutil
+from datetime import datetime, timedelta
 from playwright.async_api import async_playwright
 import nest_asyncio
 import uvicorn
+from typing import List, Optional
 from pathlib import Path
 
 nest_asyncio.apply()
@@ -35,7 +37,7 @@ SCREENSHOT_DIR = Path("screenshots")
 SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
 
 # ============================================
-# INDIAN NAME GENERATOR
+# INDIAN NAMES
 # ============================================
 INDIAN_FIRST_NAMES = [
     'Aarav', 'Vivaan', 'Aditya', 'Vihaan', 'Arjun', 'Reyansh', 'Ayaan', 
@@ -50,8 +52,30 @@ INDIAN_LAST_NAMES = [
     'Bansal', 'Srivastava', 'Mishra', 'Pandey', 'Rao', 'Desai', 'Nair'
 ]
 
+ENGLISH_FIRST_NAMES = [
+    'James', 'John', 'Robert', 'Michael', 'William', 'David', 'Richard', 'Joseph',
+    'Thomas', 'Charles', 'Christopher', 'Daniel', 'Matthew', 'Anthony', 'Donald',
+    'Mark', 'Paul', 'Steven', 'Andrew', 'Kenneth', 'Joshua', 'Kevin', 'Brian',
+    'George', 'Timothy', 'Ronald', 'Edward', 'Jason', 'Jeffrey', 'Ryan', 'Jacob'
+]
+
+ENGLISH_LAST_NAMES = [
+    'Smith', 'Johnson', 'Williams', 'Brown', 'Jones', 'Garcia', 'Miller', 'Davis',
+    'Rodriguez', 'Martinez', 'Hernandez', 'Lopez', 'Wilson', 'Anderson', 'Thomas',
+    'Taylor', 'Moore', 'Jackson', 'Martin', 'Lee', 'Perez', 'Thompson', 'White',
+    'Harris', 'Sanchez', 'Clark', 'Ramirez', 'Lewis', 'Robinson', 'Walker', 'Young'
+]
+
 def get_indian_name():
     return f"{random.choice(INDIAN_FIRST_NAMES)} {random.choice(INDIAN_LAST_NAMES)}"
+
+def get_english_name():
+    return f"{random.choice(ENGLISH_FIRST_NAMES)} {random.choice(ENGLISH_LAST_NAMES)}"
+
+def get_name(name_type):
+    if name_type == "english":
+        return get_english_name()
+    return get_indian_name()
 
 # ============================================
 # ZOOM URL
@@ -70,9 +94,20 @@ def get_zoom_url(meeting_code):
 class StartBotRequest(BaseModel):
     meeting_code: str
     passcode: str = ""
-    bot_count: int = 5
-    duration_minutes: int = 10
-    names: Optional[List[str]] = None
+    bot_count: int
+    duration_minutes: int = 5
+    name_type: str = "indian"
+
+class StopBotRequest(BaseModel):
+    meeting_code: str
+
+# ============================================
+# STATE
+# ============================================
+active_browsers = {}  # tag -> browser object
+active_meetings = {}  # meeting_code -> {start_time, bots, timeout, status}
+meeting_timers = {}   # meeting_code -> timer thread
+billing_enabled = True
 
 # ============================================
 # SYNC BARRIER
@@ -100,55 +135,47 @@ async def wait_for_all_bots():
     await READY_TO_JOIN.wait()
 
 # ============================================
-# SCREENSHOT HELPER
+# KILL ALL BROWSERS
 # ============================================
-async def take_screenshot(page, tag, step_name):
-    try:
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        filename = f"{tag}_{step_name}_{timestamp}.png"
-        filepath = SCREENSHOT_DIR / filename
-        await page.screenshot(path=str(filepath), full_page=True)
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - 📸 Screenshot: {filename}")
-        return filename
-    except Exception:
-        return None
-
-# ============================================
-# POPUP HANDLER
-# ============================================
-async def handle_popups(page, tag):
-    try:
-        cookie_selectors = [
-            '//button[contains(text(), "Accept")]',
-            '//button[contains(text(), "Accept All")]',
-            '//button[contains(text(), "Allow")]',
-            '//button[contains(@class, "accept")]',
-            '//button[@id="onetrust-accept-btn-handler"]'
-        ]
-        
-        for selector in cookie_selectors:
-            try:
-                cookie_btn = page.locator(f'xpath={selector}')
-                if await cookie_btn.count() > 0:
-                    await cookie_btn.first.click()
-                    print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - 🍪 Cookies accepted")
-                    await asyncio.sleep(0.3)
-                    break
-            except:
-                continue
-
+def kill_all_browsers():
+    """Kill all browser processes immediately"""
+    killed = 0
+    for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
         try:
-            await page.mouse.click(100, 100)
+            cmdline = ' '.join(proc.info['cmdline'] or [])
+            if 'chromium' in cmdline.lower() or 'chrome' in cmdline.lower():
+                if 'playwright' in cmdline.lower():
+                    proc.kill()
+                    killed += 1
         except:
             pass
+    return killed
 
-    except Exception:
-        pass
+async def kill_meeting_browsers(meeting_code):
+    """Kill all browsers associated with a meeting"""
+    killed = 0
+    tags_to_remove = []
+    
+    for tag, browser in list(active_browsers.items()):
+        if tag.startswith(meeting_code):
+            try:
+                await browser.close()
+                killed += 1
+                tags_to_remove.append(tag)
+            except:
+                pass
+    
+    for tag in tags_to_remove:
+        del active_browsers[tag]
+    
+    # Kill any leftover processes
+    killed += kill_all_browsers()
+    return killed
 
 # ============================================
-# OPTIMIZED BOT FUNCTION
+# BOT FUNCTION
 # ============================================
-async def start_optimized(tag, wait_time, meetingcode, passcode, bot_name=None):
+async def start_bot(tag, wait_time, meetingcode, passcode, name_type="indian"):
     global BOTS_FAILED
     
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - Started")
@@ -187,6 +214,9 @@ async def start_optimized(tag, wait_time, meetingcode, passcode, bot_name=None):
                 ]
             )
 
+            # Store browser reference
+            active_browsers[tag] = browser
+
             context = await browser.new_context(
                 viewport={"width": 800, "height": 600},
                 permissions=[],
@@ -198,13 +228,10 @@ async def start_optimized(tag, wait_time, meetingcode, passcode, bot_name=None):
             
             await page.goto(zoom_url, timeout=60000)
             await asyncio.sleep(2)
-            
-            await handle_popups(page, tag)
-            await take_screenshot(page, tag, "01_page_loaded")
 
             # NAME INPUT
             try:
-                user_name = bot_name if bot_name else get_indian_name()
+                user_name = get_name(name_type)
                 name_selectors = [
                     '//*[@id="input-for-name"]',
                     '//input[@placeholder="Enter your name"]',
@@ -220,14 +247,12 @@ async def start_optimized(tag, wait_time, meetingcode, passcode, bot_name=None):
                             await name_input.first.fill(user_name)
                             name_filled = True
                             print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - Name: {user_name}")
-                            await take_screenshot(page, tag, "02_name_filled")
                             break
                     except:
                         continue
                 
                 if not name_filled:
                     await page.keyboard.type(user_name)
-                    await take_screenshot(page, tag, "02_name_typed")
                     
             except Exception as e:
                 print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - Name error: {e}")
@@ -241,7 +266,6 @@ async def start_optimized(tag, wait_time, meetingcode, passcode, bot_name=None):
                     if await pass_input.count() > 0:
                         await pass_input.fill(passcode)
                         print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - Passcode entered")
-                        await take_screenshot(page, tag, "03_passcode_filled")
                 except Exception:
                     pass
 
@@ -254,22 +278,22 @@ async def start_optimized(tag, wait_time, meetingcode, passcode, bot_name=None):
                 join_btn = page.locator(f'xpath={join_xpath}')
                 if await join_btn.count() > 0:
                     await join_btn.click()
-                    await take_screenshot(page, tag, "04_join_clicked")
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - Join clicked")
                 else:
                     await page.keyboard.press('Enter')
-                    await take_screenshot(page, tag, "04_enter_pressed")
-            except Exception:
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - Enter pressed")
+            except Exception as e:
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - Join error: {e}")
                 await page.keyboard.press('Enter')
 
             await asyncio.sleep(3)
-            await handle_popups(page, tag)
-            await take_screenshot(page, tag, "05_after_join")
             
+            # Audio join
             try:
                 audio_btn = page.locator('xpath=//button[contains(text(), "Join Audio")]')
                 if await audio_btn.count() > 0:
                     await audio_btn.click()
-                    await take_screenshot(page, tag, "06_audio_joined")
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - Audio joined")
             except Exception:
                 pass
 
@@ -277,40 +301,47 @@ async def start_optimized(tag, wait_time, meetingcode, passcode, bot_name=None):
             try:
                 leave_btn = page.locator('xpath=//button[contains(text(), "Leave")]')
                 if await leave_btn.count() > 0:
-                    print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - ✅ CONFIRMED: In meeting!")
-                    await take_screenshot(page, tag, "07_confirmed_in_meeting")
-                else:
-                    print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - ⚠️ Not confirmed")
-                    await take_screenshot(page, tag, "07_not_confirmed")
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - CONFIRMED: In meeting!")
             except:
                 pass
 
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - ✅ Joined! Staying for {wait_time//60} minutes")
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - Joined! Staying for {wait_time//60} minutes")
             
+            # STAY IN MEETING
             elapsed = 0
             while elapsed < wait_time:
+                # Check if billing is disabled
+                if not billing_enabled:
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - Billing disabled, stopping...")
+                    break
+                    
                 await asyncio.sleep(10)
                 elapsed += 10
                 
                 if elapsed % 60 == 0:
                     gc.collect()
-                    await take_screenshot(page, tag, f"08_keepalive_{elapsed//60}m")
                     try:
                         await page.evaluate("() => 'ping'")
                     except:
                         print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - Ping failed")
                         break
 
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - ✅ Done")
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - Done")
             
             await page.close()
             await context.close()
             await browser.close()
             gc.collect()
             
+            # Remove from active browsers
+            if tag in active_browsers:
+                del active_browsers[tag]
+            
     except Exception as e:
         print(f"[{datetime.now().strftime('%H:%M:%S')}] {tag} - Failed: {str(e)[:100]}")
         BOTS_FAILED += 1
+        if tag in active_browsers:
+            del active_browsers[tag]
 
 # ============================================
 # API ENDPOINTS
@@ -321,7 +352,11 @@ async def root():
 
 @app.post("/api/start-bots")
 async def start_bots(request: StartBotRequest):
-    global BOTS_TOTAL, BOTS_READY, BOTS_FAILED
+    global BOTS_TOTAL, BOTS_READY, BOTS_FAILED, billing_enabled
+    
+    if not billing_enabled:
+        raise HTTPException(status_code=403, detail="Billing is disabled")
+    
     try:
         if request.bot_count < 1 or request.bot_count > 5:
             raise HTTPException(status_code=400, detail="Bot count must be between 1 and 5")
@@ -331,13 +366,25 @@ async def start_bots(request: StartBotRequest):
         BOTS_FAILED = 0
         READY_TO_JOIN.clear()
         
+        # Track meeting
+        if request.meeting_code not in active_meetings:
+            active_meetings[request.meeting_code] = {
+                "start_time": datetime.now(),
+                "bots": request.bot_count,
+                "duration": request.duration_minutes,
+                "status": "running",
+                "name_type": request.name_type
+            }
+        else:
+            active_meetings[request.meeting_code]["status"] = "running"
+        
         def run_bots():
             asyncio.run(run_bot_tasks(
                 request.meeting_code, 
                 request.passcode, 
                 request.bot_count, 
                 request.duration_minutes,
-                request.names
+                request.name_type
             ))
         
         thread = threading.Thread(target=run_bots)
@@ -353,19 +400,92 @@ async def start_bots(request: StartBotRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-async def run_bot_tasks(meeting_code, passcode, bot_count, duration_minutes, names=None):
+async def run_bot_tasks(meeting_code, passcode, bot_count, duration_minutes, name_type):
     duration_seconds = duration_minutes * 60
     tasks = []
     for i in range(bot_count):
-        tag = f"Bot-{i+1}"
-        bot_name = names[i] if names and i < len(names) else None
+        tag = f"{meeting_code}-Bot-{i+1}"
         task = asyncio.create_task(
-            start_optimized(tag, duration_seconds, meeting_code, passcode, bot_name)
+            start_bot(tag, duration_seconds, meeting_code, passcode, name_type)
         )
         tasks.append(task)
-        await asyncio.sleep(1.5)
+        await asyncio.sleep(0.5)
     
     await asyncio.gather(*tasks)
+    
+    # Update meeting status
+    if meeting_code in active_meetings:
+        active_meetings[meeting_code]["status"] = "completed"
+        active_meetings[meeting_code]["completed_at"] = datetime.now().isoformat()
+
+@app.post("/api/stop-bots")
+async def stop_bots(request: StopBotRequest):
+    """Kill all bots for a meeting immediately"""
+    meeting_code = request.meeting_code
+    
+    # Kill all browsers
+    killed = await kill_meeting_browsers(meeting_code)
+    
+    # Update meeting status
+    if meeting_code in active_meetings:
+        active_meetings[meeting_code]["status"] = "killed"
+        active_meetings[meeting_code]["killed_at"] = datetime.now().isoformat()
+    
+    return {
+        "success": True,
+        "message": f"Stopped {killed} bots for meeting {meeting_code}",
+        "bots_killed": killed
+    }
+
+@app.post("/api/toggle-billing")
+async def toggle_billing(request: dict):
+    global billing_enabled
+    
+    enabled = request.get("enabled", True)
+    billing_enabled = enabled
+    
+    if not enabled:
+        # Kill all active meetings
+        killed_total = 0
+        for meeting_code in list(active_meetings.keys()):
+            if active_meetings[meeting_code]["status"] == "running":
+                killed = await kill_meeting_browsers(meeting_code)
+                killed_total += killed
+                active_meetings[meeting_code]["status"] = "paused"
+                active_meetings[meeting_code]["paused_at"] = datetime.now().isoformat()
+        
+        return {
+            "success": True,
+            "billing_enabled": False,
+            "message": f"Billing disabled. Killed {killed_total} bots.",
+            "bots_killed": killed_total
+        }
+    
+    return {
+        "success": True,
+        "billing_enabled": True,
+        "message": "Billing enabled. System ready."
+    }
+
+@app.get("/api/status")
+async def get_status():
+    running_bots = len(active_browsers)
+    
+    # Clean up completed meetings older than 1 hour
+    for code, meeting in list(active_meetings.items()):
+        if meeting["status"] in ["completed", "killed"]:
+            if "completed_at" in meeting:
+                completed_time = datetime.fromisoformat(meeting["completed_at"])
+                if (datetime.now() - completed_time).seconds > 3600:
+                    del active_meetings[code]
+    
+    return {
+        "billing_enabled": billing_enabled,
+        "active_meetings": active_meetings,
+        "running_bots": running_bots,
+        "total_bots": sum(m["bots"] for m in active_meetings.values()),
+        "meetings": list(active_meetings.keys())
+    }
 
 @app.get("/health")
 async def health():
@@ -376,4 +496,4 @@ async def health():
     }
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8080)
